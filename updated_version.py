@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from requests.exceptions import HTTPError
 import requests
 from bs4 import BeautifulSoup
+import pytz
 
 
 def validate_date(date_string):
@@ -64,12 +65,9 @@ def prepare_day_df(ticker, api_key, date):
     # Check if the request was successful
     if response.status_code == 200:
         data = response.json()
-        # print(data)
         if 'results' in data and len(data['results']) > 0:
             df = pd.DataFrame(data['results'])
             prev_close = df['c'][0]     
-            # print(prev_close)    
-            # print(f"Previous Close for {previous_date}: {closing_price}")
         else:
             print("No data found for the specified date.")
     else:
@@ -85,82 +83,99 @@ def prepare_day_df(ticker, api_key, date):
     if minute_data_response.status_code == 200:
         minute_data = minute_data_response.json()
         if 'results' in minute_data and len(minute_data['results']) > 0:
-            df = pd.DataFrame(minute_data['results'])
-            df['time'] = pd.to_datetime(df['t'], unit='ms')
-            # print(df)
-            # Define the start of the afternoon session
-            afternoon_start = pd.to_datetime(f'{date} 12:00:00')
+            # Extract the 'results' part of the data
+            results = minute_data['results']
 
-            # Calculate PM Hi
-            afternoon_data = df[df['time'] >= afternoon_start]
+            # Convert the 'results' to a DataFrame
+            minute_data = pd.DataFrame(results)
+            
+            # Define the desired time zone
+            timezone = pytz.timezone('America/New_York')
+            
+            minute_data['time'] = pd.to_datetime(minute_data['t'], unit='ms', utc=True).dt.tz_convert(timezone).dt.tz_localize(None)
+            
+            # Define the start of the afternoon session
+            afternoon_4 = pd.to_datetime(f'{date} 04:00:00').tz_localize(timezone).tz_localize(None)
+            afternoon_9_29 = pd.to_datetime(f'{date} 09:29:00').tz_localize(timezone).tz_localize(None)
+            afternoon_9_30 = pd.to_datetime(f'{date} 09:30:00').tz_localize(timezone).tz_localize(None)
+            afternoon_end_16 = pd.to_datetime(f'{date} 16:00:00').tz_localize(timezone).tz_localize(None)
+            afternoon_end_19 = pd.to_datetime(f'{date} 19:00:00').tz_localize(timezone).tz_localize(None)
+
+            # Calculate PM Hi and its time
+            afternoon_data = minute_data[(minute_data['time'] >= afternoon_4) & (minute_data['time'] <= afternoon_9_29)]
             pm_high = afternoon_data['h'].max()
             pm_high_time = afternoon_data.loc[afternoon_data['h'].idxmax(), 'time']
-
+            
             # Calculate PM Low Post Hi
-            post_high_data = df[df['time'] >= pm_high_time]
+            post_high_data = minute_data[minute_data['time'] >= pm_high_time]
             pm_low_post_hi = post_high_data['l'].min()
             pm_low_post_hi_time = post_high_data.loc[post_high_data['l'].idxmin(), 'time']
 
+            #Calculate PM total vol to PM High
+            afternoon_data1 = minute_data[(minute_data['time'] >= afternoon_4) & (minute_data['time'] <= afternoon_9_29)]
+            # Find the highest price during this time frame
+            highest_price_idx = afternoon_data1['h'].idxmax()
+            # Sum the volume of trades that occurred at the highest price
+            total_volume_given_time = afternoon_data1.loc[:highest_price_idx, 'v'].sum()
+
+            
             # Calculate PM Volume
-            pm_vol = afternoon_data['v'].sum()
+            pm_vol = afternoon_data1['v'].sum()
 
             # Calculate Open Price
-            open_price = df.iloc[0]['o']
+            open_price_df = minute_data[minute_data['time'] >= afternoon_9_30]
+            open_price_given_time = open_price_df.iloc[0]['o']
 
             # Calculate Open 1 Minute Volume
-            open_1_min_vol = df.iloc[0]['v']
+            open_1_min_vol = open_price_df.iloc[0]['v']
+            
+            # Calculate Open 2 Minute Volume
+            open_2_min_vol = open_price_df.iloc[0]['v'] + open_price_df.iloc[1]['v']
 
             # Identify key points
-            open_price = df.iloc[0]['o']
-            intra_day_high = df['h'].max()
-            intra_day_high_time = df[df['h'] == intra_day_high]['time'].iloc[0]
+            open_price = minute_data.iloc[0]['o']
+            intra_day_high = minute_data['h'].max()
+            intra_day_high_time = minute_data[minute_data['h'] == intra_day_high]['time'].iloc[0]
             
-            # PM High and its time
-            afternoon_start = pd.to_datetime(f'{date} 12:00:00')
-            afternoon_data = df[df['time'] >= afternoon_start]
-            pm_high = afternoon_data['h'].max()
-            pm_high_time = afternoon_data[afternoon_data['h'] == pm_high]['time'].iloc[0]
-
-            # Calculate ∑ VOL: PM High to Intra-Day High
-            post_pm_data = df[df['time'] >= pm_high_time]
-            volume_pm_to_intra_hi = post_pm_data[post_pm_data['time'] <= intra_day_high_time]['v'].sum()
+            # Calculate ∑ VOL: PM to Intra-Day High
+            post_pm_data = minute_data[(minute_data['time'] >= afternoon_4) & (minute_data['time'] <= afternoon_end_16)]
+            highest_price_intra_day = post_pm_data['h'].max()
+            highest_price_idx_intra_day = post_pm_data['h'].idxmax()
+            volume_pm_to_intra_hi = post_pm_data.loc[:highest_price_idx_intra_day, 'v'].sum()
             
             # Calculate ∑ VOL: Open to Intra-Day High
-            volume_open_to_intra_hi = df[df['time'] <= intra_day_high_time]['v'].sum()
-
+            post_pm_data_open = minute_data[(minute_data['time'] >= afternoon_9_29) & (minute_data['time'] <= afternoon_end_16)]
+            highest_price_intra_day_open = post_pm_data_open['h'].max()
+            highest_price_idx_intra_day_open = post_pm_data_open['h'].idxmax()
+            volume_open_to_intra_hi = post_pm_data_open.loc[:highest_price_idx_intra_day_open, 'v'].sum()
             
             # Calculate 2m + 50% Gap Price
-            two_min_high = df.iloc[:2]['h'].max()
+            two_min_high = minute_data.iloc[:2]['h'].max()
             gap = open_price - prev_close
             gap_50_percent = 0.5 * gap
             two_min_plus_50_gap_price = two_min_high + gap_50_percent
-            two_min_plus_50_gap_time = df['time'][df.iloc[:2]['h'].idxmax()]
+            two_min_plus_50_gap_time = minute_data['time'][minute_data.iloc[:2]['h'].idxmax()]
 
             # Calculate HOD (High of the Day)
-            hod = df['h'].max()
-            hod_time = df.loc[df['h'].idxmax(), 'time']
+            hod_data = minute_data[(minute_data['time'] >= afternoon_9_29) & (minute_data['time'] <= afternoon_end_16)]
+            hod = hod_data['h'].max()
+            hod_time = hod_data.loc[hod_data['h'].idxmax(), 'time']
 
             # Calculate HOD % change from open price
             hod_percent_change = ((hod - open_price) / open_price) * 100
 
             # Calculate HOD 1 Minute Volume
-            hod_1_min_vol = df.loc[df['h'].idxmax(), 'v']
+            highest_price_hod = hod_data['h'].max()
+            highest_price_idx_hod = hod_data['h'].idxmax()
+            hod_1_min_vol = hod_data.loc[:highest_price_idx_hod, 'v']
 
-            # Calculate LOD Pre Hi (Low of the Day before PM High)
-            pre_high_data = df[df['time'] < pm_high_time]
-            lod_pre_hi = pre_high_data['l'].min()
-            lod_pre_hi_time = pre_high_data.loc[pre_high_data['l'].idxmin(), 'time']
-
-            # Calculate LOD Post Hi (Low of the Day after PM High)
-            lod_post_hi = post_high_data['l'].min()
-            lod_post_hi_time = post_high_data.loc[post_high_data['l'].idxmin(), 'time']
-
-            # Calculate EOD % change from open price
-            eod_price = df.iloc[-1]['c']
+            # Calculate EOD Price and % change from open pricezz
+            eod_price = minute_data[minute_data['time'] >= afternoon_end_16].iloc[0]['o']
             eod_percent_change = ((eod_price - open_price) / open_price) * 100
 
             # Calculate Total Volume for the Day
-            total_volume = df['v'].sum()
+            total_volume_data = minute_data[(minute_data['time'] >= afternoon_4) & (minute_data['time'] <= afternoon_end_19)]
+            total_volume = total_volume_data['v'].sum()
 
             data_dict = {
                 "Date" : date,
@@ -169,25 +184,17 @@ def prepare_day_df(ticker, api_key, date):
                 "PREV Close" : prev_close,
                 "PM Hi" : pm_high,
                 "PM Hi Time" : pm_high_time,
-                "PM Low-Post Hi" : pm_low_post_hi, 
-                "PM Low-Post Hi Time" : pm_low_post_hi_time,
+                "PM total vol to PM High" : total_volume_given_time,
                 "PM Volume" : pm_vol,
-                "Open $" : open_price,
+                "Open $" : open_price_given_time,
                 "Open 1 min Vol" : open_1_min_vol,
+                "Open 2 min Vol" : open_2_min_vol,
                 "∑ VOL: PM High to Intra-Day High" : volume_pm_to_intra_hi,
                 "∑ VOL: Open to Intra-Day High" : volume_open_to_intra_hi,
-                "2m + 50% Gap Price" : two_min_plus_50_gap_price,
-                "2m + 50% Gap Price Time" : two_min_plus_50_gap_time,
                 "HOD" : hod,
                 "HOD Time" : hod_time,
-                "HOD %" : hod_percent_change,
-                "HOD 1 Minute Volume" : hod_1_min_vol,
-                "LOD Pre Hi" : lod_pre_hi,
-                "LOD Pre Hi Time" : lod_pre_hi_time,
-                "LOD Post Hi" : lod_post_hi,
-                "LOD Post Hi Time" : lod_post_hi_time,
-                "EOD %" : eod_percent_change,
-                "Total Volume" : total_volume,
+                "EOD $" : eod_price,
+                "Volume" : total_volume,
             }
             
             # # Print the results
@@ -235,10 +242,12 @@ def prepare_minute_df(ticker, date, api_key):
     if response.status_code == 200:
         data = response.json()
         if 'results' in data and len(data['results']) > 0:
+            # Define the desired time zone
+            timezone = pytz.timezone('America/New_York')
             # Loop through the results and extract the desired values
             data_dict = [{
-                # Convert timestamp to readable date-time if needed
-                'time' : pd.to_datetime(result['t'], unit='ms'),
+                # Convert timestamp to datetime in UTC and then to the desired time zone
+                'time': pd.to_datetime(result['t'], unit='ms', utc=True).tz_convert(timezone).tz_localize(None),
                 'open_price' : result['o'],  # Open price
                 'close_price' : result['c'],  # Close price
                 'high_price' : result['h'],  # High price
@@ -337,7 +346,7 @@ def scrape_ticker(ticker):
 if __name__ == "__main__":
     
     # Your Polygon API key
-    api_key = 'Type your API Key'
+    api_key = 'uZrGN5iyiIoNfDfWewnVLhss2SXwNQ82'
 
     # Initialize the RESTClient with your API key
     client = RESTClient(api_key)
@@ -401,8 +410,8 @@ if __name__ == "__main__":
             # Write the aggregate data
             combine_data_df.to_excel(writer, sheet_name='Aggregated Data', index=False)
             # Write minute-wise data for each ticker
-            for ticker, df in minute_data_dfs.items():
-                df.to_excel(writer, sheet_name=ticker, index=False)
+            for ticker, minute_data in minute_data_dfs.items():
+                minute_data.to_excel(writer, sheet_name=ticker, index=False)
     except:
         raise Exception("Not data found")
             
